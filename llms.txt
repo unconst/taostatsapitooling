@@ -1,0 +1,154 @@
+Taostats API – Practical Guide for LLMs and Scripts
+
+Overview
+- The Taostats API provides read-only blockchain and network analytics for the Bittensor/Subtensor chain.
+- Requests are standard HTTP GETs that return JSON. Most list endpoints are paginated.
+- Monetary values are generally in planck-like units (1e9 = 1 TAO). Divide numeric amounts by 1e9 for human-readable TAO.
+
+Base URL and Auth
+- Base URL: https://api.taostats.io
+- Auth header: set an API key from dash.taostats.io
+  - Header: Authorization: <YOUR_API_KEY>
+  - Header: accept: application/json
+- Example curl header:
+  curl -H "accept: application/json" -H "Authorization: $API_KEY" "https://api.taostats.io/..."
+
+Rate Limits and Retries
+- If you receive HTTP 429 (Too Many Requests), read the Retry-After header and wait that many seconds before retrying.
+- If Retry-After is absent, back off for ~20–60 seconds. Avoid tight loops.
+
+Pagination
+- Pagination object is returned alongside data, e.g.: { pagination: { total_pages, next_page, total_items }, data: [...] }
+- Iterate pages by incrementing page until next_page is null.
+- Typical query parameters: limit (default up to 200), page (start at 1), order (varies per endpoint).
+
+Time and Blocks
+- Many endpoints accept either timestamp or block range filters.
+  - timestamp_start, timestamp_end: Unix epoch seconds
+  - start_block, end_block or block_start, block_end: inclusive block number range
+- Timestamps in responses may be ISO-8601 strings with or without fractional seconds.
+
+Addresses and Keys
+- Use SS58-encoded addresses for accounts (coldkeys/hotkeys). Fields in responses often include { ss58: "..." }.
+
+Core Endpoints and Recipes
+
+1) Network Stats (Latest)
+- Purpose: quick network snapshot (e.g., subnet count).
+- Endpoint: GET /api/stats/latest/v1
+- Example:
+  curl -H "accept: application/json" -H "Authorization: $API_KEY" \
+       "https://api.taostats.io/api/stats/latest/v1"
+- Notes: Response includes data[0].subnets and other network-wide metrics.
+
+2) Blocks (Latest N)
+- Purpose: get recent blocks or discover the latest block number.
+- Endpoint: GET /api/block/v1
+- Params: limit
+- Example (latest block only):
+  curl -H "accept: application/json" -H "Authorization: $API_KEY" \
+       "https://api.taostats.io/api/block/v1?limit=1"
+- Notes: Response includes data[0].block_number.
+
+3) Extrinsics (Filter by call, time, or block)
+- Purpose: list extrinsics matching particular calls (e.g., SubtensorModule.set_weights) in a time or block window.
+- Endpoint: GET /api/extrinsic/v1
+- Params commonly used:
+  - full_name: exact call, e.g., SubtensorModule.set_weights
+  - timestamp_start, timestamp_end: epoch seconds
+  - start_block, end_block: block range (alternative to timestamps)
+  - limit, page
+- Example (time window + call filter):
+  curl -H "accept: application/json" -H "Authorization: $API_KEY" \
+       "https://api.taostats.io/api/extrinsic/v1?full_name=SubtensorModule.set_weights&timestamp_start=1736531098&timestamp_end=1736792133&limit=200&page=1"
+- Iterate pages until pagination.next_page is null.
+
+4) Account Balance History (Daily snapshots)
+- Purpose: retrieve daily balance aggregates for a coldkey over time.
+- Endpoint: GET /api/account/history/v1
+- Params: address (SS58), timestamp_start, timestamp_end, limit, page, order=timestamp_asc
+- Example:
+  curl -H "accept: application/json" -H "Authorization: $API_KEY" \
+       "https://api.taostats.io/api/account/history/v1?address=5HBtpwxuGNL1gwzwomwR7sjwUt8WXYSuWcLYN6f9KpTZkP4k&timestamp_start=1704085200&timestamp_end=1735707600&limit=200&page=1&order=timestamp_asc"
+- Fields: balance_total, balance_staked, balance_free, timestamp. Divide by 1e9 for TAO.
+- Iterate pages and accumulate data for CSV or plotting.
+
+5) Delegation Events (By nominator or by block/time window)
+- Purpose: list delegation and undelegation events. Useful for computing net delegated TAO or stake flow.
+- Endpoint: GET /api/delegation/v1
+- Params commonly used:
+  - nominator: SS58 of the coldkey delegating stake (optional depending on query)
+  - timestamp_start, timestamp_end OR block_start, block_end
+  - order (e.g., block_number_asc), limit, page
+- Examples:
+  - For a nominator over time:
+    curl -H "accept: application/json" -H "Authorization: $API_KEY" \
+         "https://api.taostats.io/api/delegation/v1?nominator=5HBtpwxuGNL1gwzwomwR7sjwUt8WXYSuWcLYN6f9KpTZkP4k&timestamp_start=1704085200&timestamp_end=1735707600&limit=200&page=1&order=block_number_asc"
+  - For a recent 24h (by blocks):
+    # assuming you compute block_start and block_end from /api/block/v1
+    curl -H "accept: application/json" -H "Authorization: $API_KEY" \
+         "https://api.taostats.io/api/delegation/v1?page=1&limit=200&block_start=<START>&block_end=<END>"
+- Fields: action (DELEGATE | UNDELEGATE), amount (divide by 1e9), timestamp, delegate.ss58, nominator.ss58.
+- Tip: To estimate stake earnings for a nominator over a period, compute day-over-day change in balance_staked from account history and subtract net delegation in/out.
+
+6) Validators (Latest snapshot, ranked)
+- Purpose: list validators by stake, with names and hotkeys.
+- Endpoint: GET /api/validator/latest/v1
+- Params: limit, order (e.g., stake_desc)
+- Example:
+  curl -H "accept: application/json" -H "Authorization: $API_KEY" \
+       "https://api.taostats.io/api/validator/latest/v1?limit=25&order=stake_desc"
+- Fields: name, stake (divide by 1e9), hotkey: { ss58 }.
+
+Practical Query Recipes
+- Latest block number, then pull events for last 24h by blocks:
+  1) GET /api/block/v1?limit=1 → block_end
+  2) Set block_start = block_end - 7200 (approx 24h)
+  3) GET /api/delegation/v1 with block_start/block_end, iterate pages
+- Track an account’s free vs staked balance over time:
+  - GET /api/account/history/v1 with address and time window; order by timestamp_asc; export to CSV
+- Filter on-chain activity by call:
+  - GET /api/extrinsic/v1 with full_name and time or block window; paginate and aggregate
+- Rank validators by stake right now:
+  - GET /api/validator/latest/v1?limit=N&order=stake_desc
+
+Error Handling Tips
+- 401 Unauthorized: check your Authorization header and API key value.
+- 404 Not Found: verify endpoint path and parameters spelling.
+- 429 Too Many Requests: respect Retry-After; back off and retry.
+- 5xx: transient server error; back off and retry.
+
+Data Handling Notes
+- Amount scaling: divide amounts by 1e9 to convert to TAO.
+- Timestamps: some fields may include fractional seconds; be liberal in parsing ISO-8601.
+- Pagination: do not assume a fixed number of pages; follow pagination.next_page.
+
+Minimal Python Template
+- Use requests with headers and a paging loop. Pseudocode shape (values to be filled by your app):
+
+  headers = { "accept": "application/json", "Authorization": API_KEY }
+  url = "https://api.taostats.io/api/<resource>/v1"
+  params = { "limit": 200, "page": 1, ...filters }
+  while params["page"] is not None:
+      r = requests.get(url, headers=headers, params=params)
+      if r.status_code == 429:
+          sleep(int(r.headers.get("Retry-After", 30)))
+          continue
+      r.raise_for_status()
+      j = r.json()
+      process(j["data"])  # append to a list/DF
+      params["page"] = j["pagination"]["next_page"]
+
+Quick Reference
+- Base: https://api.taostats.io
+- Key endpoints seen in examples:
+  - /api/stats/latest/v1
+  - /api/block/v1
+  - /api/extrinsic/v1
+  - /api/account/history/v1
+  - /api/delegation/v1
+  - /api/validator/latest/v1
+
+Notes
+- The API surface is broader than the examples above; the same request patterns apply across endpoints: set headers, supply filters, handle pagination, and respect rate limits.
+- For additional filters or resources, inspect API responses for available fields and consult Taostats documentation on the dashboard. 
